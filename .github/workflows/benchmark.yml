@@ -1,0 +1,28 @@
+name: Browser Performance Benchmark
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npx vite preview --host 127.0.0.1 --port 4173 > /tmp/vite.log 2>&1 &
+      - name: Run 10 benchmark iterations
+        env:
+          BENCH_RUNS: 10
+          BENCH_URL: http://127.0.0.1:4173/fly-brain/?flies=1
+        run: node scripts/benchmark.js
