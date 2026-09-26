@@ -1,13 +1,13 @@
 import { chromium } from 'playwright';
+import { writeFileSync } from 'node:fs';
 
 const url = process.env.BENCH_URL || 'http://127.0.0.1:4173/fly-brain/?flies=1';
 const runs = Number(process.env.BENCH_RUNS || 10);
 const warmupMs = 8000;
 const sampleMs = 12000;
-
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const totals = new Map();
-const frameSamples = [];
+const samples = [];
 
 function add(map, key, value) {
   const v = map.get(key) || { samples: 0, total: 0 };
@@ -26,65 +26,72 @@ try {
     await page.locator('#play').click();
     await sleep(warmupMs);
 
+    await page.evaluate(() => {
+      window.__bench = { frames: 0, renderMs: 0, shadowUpdates: 0, brainUploads: 0, brainDraws: 0 };
+      const tick = () => {
+        const a = window.__arena;
+        if (a?.metrics) {
+          window.__bench.renderMs += Number(a.metrics.renderMs) || 0;
+          window.__bench.shadowUpdates = Number(a.metrics.shadowUpdates) || 0;
+          window.__bench.brainUploads = Number(a.metrics.brainUploads) || 0;
+          window.__bench.brainDraws = Number(a.metrics.brainDraws) || 0;
+        }
+        window.__bench.frames++;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
     await client.send('Profiler.enable');
     await client.send('Profiler.start', { samplingInterval: 1000 });
     const start = Date.now();
-    const before = await page.evaluate(() => ({
-      calls: window.__arena.renderer.info.render.calls,
-      triangles: window.__arena.renderer.info.render.triangles,
-      simTime: window.__arena.flies[0]?.last?.t || 0,
-    }));
+    const before = await page.evaluate(() => ({ simTime: window.__arena.flies[0]?.last?.t || 0 }));
     await sleep(sampleMs);
     const profile = await client.send('Profiler.stop');
     const elapsed = Date.now() - start;
     const after = await page.evaluate(() => ({
-      calls: window.__arena.renderer.info.render.calls,
-      triangles: window.__arena.renderer.info.render.triangles,
       simTime: window.__arena.flies[0]?.last?.t || 0,
-      metrics: { ...window.__arena.metrics },
+      bench: { ...window.__bench },
     }));
 
-    const samples = profile.profile?.samples || [];
+    const profileSamples = profile.profile?.samples || [];
     const nodes = new Map((profile.profile?.nodes || []).map(n => [n.id, n]));
-    for (const id of samples) {
+    for (const id of profileSamples) {
       const node = nodes.get(id);
       if (!node) continue;
       const key = `${node.callFrame.url || '<native>'} :: ${node.callFrame.functionName || '<anonymous>'}`;
       add(totals, key, 1);
     }
 
-    frameSamples.push({
+    const frameCount = after.bench.frames;
+    const row = {
       run,
       elapsedMs: elapsed,
-      renderCalls: after.calls - before.calls,
-      renderCallsPerSec: (after.calls - before.calls) / (elapsed / 1000),
-      trianglesPerFrame: (after.triangles - before.triangles) / Math.max(1, after.calls - before.calls),
+      frames: frameCount,
+      fps: frameCount / (elapsed / 1000),
       simMsPerWallMs: (after.simTime - before.simTime) / elapsed,
-      renderMs: after.metrics.renderMs,
-      shadowUpdates: after.metrics.shadowUpdates,
-      brainUploads: after.metrics.brainUploads,
-      brainDraws: after.metrics.brainDraws,
-    });
+      renderMsPerFrame: after.bench.renderMs / Math.max(1, frameCount),
+      shadowUpdatesPerSec: after.bench.shadowUpdates / (elapsed / 1000),
+      brainUploadsPerSec: after.bench.brainUploads / (elapsed / 1000),
+      brainDrawsPerSec: after.bench.brainDraws / (elapsed / 1000),
+    };
+    samples.push(row);
     await page.close();
-    console.log(`run ${run}/${runs}: ${JSON.stringify(frameSamples.at(-1))}`);
+    console.log(`run ${run}/${runs}: ${JSON.stringify(row)}`);
   }
 } finally {
   await browser.close();
 }
 
-const top = [...totals.entries()]
-  .sort((a, b) => b[1].total - a[1].total)
-  .slice(0, 20)
-  .map(([key, v]) => ({ function: key, samples: v.total }));
-
-const mean = key => frameSamples.reduce((s, r) => s + r[key], 0) / frameSamples.length;
+const mean = key => samples.reduce((s, r) => s + r[key], 0) / samples.length;
 const result = {
   url,
   runs,
   warmupMs,
   sampleMs,
-  averages: Object.fromEntries(['renderCallsPerSec', 'trianglesPerFrame', 'simMsPerWallMs', 'renderMs', 'shadowUpdates', 'brainUploads', 'brainDraws'].map(k => [k, mean(k)])),
-  runs: frameSamples,
-  hottestFunctions: top,
+  averages: Object.fromEntries(['fps', 'simMsPerWallMs', 'renderMsPerFrame', 'shadowUpdatesPerSec', 'brainUploadsPerSec', 'brainDrawsPerSec'].map(k => [k, mean(k)])),
+  runs: samples,
+  hottestFunctions: [...totals.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 30).map(([fn, v]) => ({ function: fn, samples: v.total })),
 };
+writeFileSync('benchmark-results.json', JSON.stringify(result, null, 2));
 console.log('BENCHMARK_RESULT=' + JSON.stringify(result));
