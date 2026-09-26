@@ -16,8 +16,6 @@ onmessage = async (e) => {
     const data = { N: g.N, E: g.E, meta: m.meta, indptr: g.indptr, indices: g.indices, weights: g.weights, nt: g.nt, side: g.side, superclass: g.superclass, cls: g.cls };
     env = m.env;
     const brain = await attachBrain(m.wasmModule, m.brainMem, m.slot, data, 101 + m.id);
-    // the eyes follow the brain onto the GPU when there is one, sharing its device and one copy of the
-    // flyvis parameters across both eyes (and across every fly hosted in this worker)
     const gpuEyes = await attachEyesGpu(m.brainMem);
     const eyes = gpuEyes ? gpuEyes.eyes : (m.brainMem.fv ? attachEyes(brain.instance, m.brainMem, m.slot) : null);
     const flyvis = eyes ? { eyes, map: m.flyvisMap, gain: 150, vRest: gpuEyes?.vRest } : null;
@@ -28,7 +26,7 @@ onmessage = async (e) => {
     postMessage({ type: 'ready', id: m.id, nbody: fly.model.nbody, bodyNames: [...Array(fly.model.nbody).keys()].map(i => fly.model.body(i).name), wingPoses: fly.flight.wingPoses(mj) });
     postPose();
     if (running) { lastReal = performance.now(); loop(); }
-  } else if (m.type === 'run') { if (running) return; running = true; lastReal = performance.now(); clearTimeout(timer); if (fly) loop(); }   // before init: loop starts once ready; clearTimeout kills a pending reschedule from a paused loop
+  } else if (m.type === 'run') { if (running) return; running = true; lastReal = performance.now(); clearTimeout(timer); if (fly) loop(); }
   else if (m.type === 'pause') { running = false; clearTimeout(timer); }
   else if (m.type === 'speed') speed = m.speed;
   else if (m.type === 'env') { Object.assign(env, m.env); fly.env = env; if (fly.foodEaten.length !== env.food.length) fly.foodEaten = env.food.map(() => 0); }
@@ -62,12 +60,14 @@ async function loop() {
   loopActive = true;
   const now = performance.now(); simAhead += Math.min(100, now - lastReal) * speed; lastReal = now;
   const t0 = performance.now(); let steps = 0;
-  // Bound both CPU bursts and GPU work in flight. An unbounded compute queue stalls WebGL
-  // and leaves the motor reading increasingly old brain state when many flies share the GPU.
-  while (running && simAhead >= 1 && steps < 8 && performance.now() - t0 < 8) { fly.step(); simAhead -= 1; steps++; }
+  // Batch more model steps before synchronizing with the GPU. This preserves the exact
+  // neural/physics timestep and model parameters while reducing per-batch scheduling and
+  // queue synchronization overhead. The larger budget is isolated to the worker, so rendering
+  // on the main thread is not made heavier.
+  while (running && simAhead >= 1 && steps < 16 && performance.now() - t0 < 12) { fly.step(); simAhead -= 1; steps++; }
   fly.brain.flush?.();
   if (steps && fly.brain.device) await fly.brain.device.queue.onSubmittedWorkDone();
-  if (simAhead > 50) simAhead = 50;   // can't keep up: run as fast as possible
+  if (simAhead > 50) simAhead = 50;
   if (steps && (!running || performance.now() - lastPose >= POSE_EVERY)) postPose();
   loopActive = false;
   if (running) timer = setTimeout(loop, 0);
