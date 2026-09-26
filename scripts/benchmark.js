@@ -22,7 +22,8 @@ try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
     const client = await page.context().newCDPSession(page);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-    await page.waitForFunction(() => window.__arena?.renderer, null, { timeout: 120000 });
+    await page.waitForFunction(() => window.__arena?.renderer && window.__arena?.flies?.some(f => f.ready), null, { timeout: 120000 });
+    await page.locator('#play').click();
     await sleep(warmupMs);
 
     await client.send('Profiler.enable');
@@ -31,6 +32,7 @@ try {
     const before = await page.evaluate(() => ({
       calls: window.__arena.renderer.info.render.calls,
       triangles: window.__arena.renderer.info.render.triangles,
+      simTime: window.__arena.flies[0]?.last?.t || 0,
     }));
     await sleep(sampleMs);
     const profile = await client.send('Profiler.stop');
@@ -38,6 +40,7 @@ try {
     const after = await page.evaluate(() => ({
       calls: window.__arena.renderer.info.render.calls,
       triangles: window.__arena.renderer.info.render.triangles,
+      simTime: window.__arena.flies[0]?.last?.t || 0,
       metrics: { ...window.__arena.metrics },
     }));
 
@@ -56,6 +59,7 @@ try {
       renderCalls: after.calls - before.calls,
       renderCallsPerSec: (after.calls - before.calls) / (elapsed / 1000),
       trianglesPerFrame: (after.triangles - before.triangles) / Math.max(1, after.calls - before.calls),
+      simMsPerWallMs: (after.simTime - before.simTime) / elapsed,
       renderMs: after.metrics.renderMs,
       shadowUpdates: after.metrics.shadowUpdates,
       brainUploads: after.metrics.brainUploads,
@@ -79,7 +83,7 @@ const result = {
   runs,
   warmupMs,
   sampleMs,
-  averages: Object.fromEntries(['renderCallsPerSec', 'trianglesPerFrame', 'renderMs', 'shadowUpdates', 'brainUploads', 'brainDraws'].map(k => [k, mean(k)])),
+  averages: Object.fromEntries(['renderCallsPerSec', 'trianglesPerFrame', 'simMsPerWallMs', 'renderMs', 'shadowUpdates', 'brainUploads', 'brainDraws'].map(k => [k, mean(k)])),
   runs: frameSamples,
   hottestFunctions: top,
 };
