@@ -30,3 +30,9 @@ jobs:
           BENCH_RUNS: 10
           BENCH_URL: http://127.0.0.1:4173/fly-brain/?flies=1
         run: node scripts/benchmark.js
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.json
+          retention-days: 30
